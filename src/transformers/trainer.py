@@ -5233,23 +5233,37 @@ class Trainer:
     def get_batch_samples(self, epoch_iterator, num_batches):
         batch_samples = []
         num_items_in_batch = None
+        print("here A")
         for _ in range(num_batches):
             try:
+                print("here B")
                 batch_samples += [next(epoch_iterator)]
+                print("here B.5")
             except StopIteration:
+                print("here C")
                 break
 
+        print("here D")
         if len(batch_samples) > 0 and "labels" in batch_samples[0]:
             # For now we don't support object detection
+            print("here E")
             try:
+                print("here F")
                 num_items_in_batch = sum([(batch["labels"].ne(-100)).sum() for batch in batch_samples])
+                print("here G")
             except (TypeError, AttributeError):
+                print("here H")
                 pass
-
+        
+        print("here I")
         if self.args.average_tokens_across_devices and num_items_in_batch is not None:
+            print("here J")
             num_items_in_batch = self.accelerator.gather(num_items_in_batch).sum().item()
 
+        print("here K")
         if torch.is_tensor(num_items_in_batch):
+            print("here L")
             num_items_in_batch = num_items_in_batch.item()
 
+        print("here M")
         return batch_samples, num_items_in_batch
