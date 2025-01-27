@@ -2103,6 +2103,7 @@ class Trainer:
             kwargs (`Dict[str, Any]`, *optional*):
                 Additional keyword arguments used to hide deprecated arguments
         """
+        print("Beginning training...")
         if resume_from_checkpoint is False:
             resume_from_checkpoint = None
 
@@ -2165,6 +2166,8 @@ class Trainer:
                 self._move_model_to_device(self.model, args.device)
             self.model_wrapped = self.model
 
+        print("model loading done")
+
         inner_training_loop = find_executable_batch_size(
             self._inner_training_loop, self._train_batch_size, args.auto_find_batch_size
         )
@@ -2172,6 +2175,7 @@ class Trainer:
             try:
                 # Disable progress bars when uploading models during checkpoints to avoid polluting stdout
                 hf_hub_utils.disable_progress_bars()
+                print("trying inner training loop 1")
                 return inner_training_loop(
                     args=args,
                     resume_from_checkpoint=resume_from_checkpoint,
@@ -2181,6 +2185,7 @@ class Trainer:
             finally:
                 hf_hub_utils.enable_progress_bars()
         else:
+            print("trying inner training loop 2")
             return inner_training_loop(
                 args=args,
                 resume_from_checkpoint=resume_from_checkpoint,
@@ -2191,6 +2196,7 @@ class Trainer:
     def _inner_training_loop(
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
     ):
+        print("entered inner training loop")
         self.accelerator.free_memory()
         self._train_batch_size = batch_size
         if self.args.auto_find_batch_size:
@@ -2209,10 +2215,13 @@ class Trainer:
                     self.args.per_device_train_batch_size = original_bs
             self.state.train_batch_size = self._train_batch_size
         logger.debug(f"Currently training with a batch size of: {self._train_batch_size}")
+        print(f"Currently training with batch size of: {self._train_batch_size}")
         # Data loader and number of training steps
         train_dataloader = self.get_train_dataloader()
         if self.is_fsdp_xla_v2_enabled:
             train_dataloader = tpu_spmd_dataloader(train_dataloader)
+
+        print("Got dataloader")
 
         # Setting up training control variables:
         # number of training epochs: num_train_epochs
@@ -2223,11 +2232,13 @@ class Trainer:
         len_dataloader = None
         num_train_tokens = None
         if has_length(train_dataloader):
+            print("entering has_length dataloader loop")
             len_dataloader = len(train_dataloader)
             num_update_steps_per_epoch = len_dataloader // args.gradient_accumulation_steps
             num_update_steps_per_epoch = max(num_update_steps_per_epoch, 1)
             num_examples = self.num_examples(train_dataloader)
             if args.max_steps > 0:
+                print("here 1")
                 max_steps = args.max_steps
                 num_train_epochs = args.max_steps // num_update_steps_per_epoch + int(
                     args.max_steps % num_update_steps_per_epoch > 0
@@ -2240,12 +2251,14 @@ class Trainer:
                         self.num_tokens(train_dataloader, args.max_steps) * args.gradient_accumulation_steps
                     )
             else:
+                print("here 2")
                 max_steps = math.ceil(args.num_train_epochs * num_update_steps_per_epoch)
                 num_train_epochs = math.ceil(args.num_train_epochs)
                 num_train_samples = self.num_examples(train_dataloader) * args.num_train_epochs
                 if args.include_tokens_per_second:
                     num_train_tokens = self.num_tokens(train_dataloader) * args.num_train_epochs
         elif args.max_steps > 0:  # Rely on max_steps when dataloader does not have a working size
+            print("here 3")
             max_steps = args.max_steps
             # Setting a very large number of epochs so we go as many times as necessary over the iterator.
             num_train_epochs = sys.maxsize
@@ -2261,6 +2274,7 @@ class Trainer:
             )
 
         if DebugOption.UNDERFLOW_OVERFLOW in self.args.debug:
+            print("underflow overflow")
             if self.args.n_gpu > 1:
                 # nn.DataParallel(model) replicates the model, creating new variables and module
                 # references registered here no longer work on other gpus, breaking the module
@@ -2271,6 +2285,7 @@ class Trainer:
             else:
                 debug_overflow = DebugUnderflowOverflow(self.model)  # noqa
 
+        print("here 3")
         delay_optimizer_creation = is_sagemaker_mp_enabled() or self.is_fsdp_xla_enabled or self.is_fsdp_enabled
 
         # We need to reset the scheduler, as its parameters may be different on subsequent calls
@@ -2279,10 +2294,14 @@ class Trainer:
             self._created_lr_scheduler = False
 
         if self.is_deepspeed_enabled:
+            print("starting deepseed init")
             self.optimizer, self.lr_scheduler = deepspeed_init(self, num_training_steps=max_steps)
+            print("done deepseed init")
 
         if not delay_optimizer_creation:
+            print("starting delay optimizer creation")
             self.create_optimizer_and_scheduler(num_training_steps=max_steps)
+            print("done delay optimizer creation")
 
         self.state = TrainerState(
             stateful_callbacks=[
@@ -2291,6 +2310,7 @@ class Trainer:
         )
         self.state.is_hyper_param_search = trial is not None
         self.state.train_batch_size = self._train_batch_size
+        print("made trainer state")
 
         # Compute absolute values for logging, eval, and save if given as ratio
         if args.logging_steps is not None:
@@ -2309,33 +2329,43 @@ class Trainer:
             else:
                 self.state.save_steps = args.save_steps
 
+        print("here 4")
         # Activate gradient checkpointing if needed
         if args.gradient_checkpointing:
             self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=args.gradient_checkpointing_kwargs)
 
+        print("here 5")
         model = self._wrap_model(self.model_wrapped)
-
+        print("here 6")
         # as the model is wrapped, don't use `accelerator.prepare`
         # this is for unhandled cases such as
         # FSDP-XLA, SageMaker MP/DP, DataParallel, IPEX
         use_accelerator_prepare = True if model is self.model else False
 
         if use_accelerator_prepare and self.is_fsdp_enabled:
+            print("here 7")
             # In case of auto_find_batch_size=True
             # Remove FSDP wrapping from sub-models.
             self.model = unwrap_model(self.model, recursive=True)
+            print("here 8")
 
         if delay_optimizer_creation:
             if use_accelerator_prepare:
+                print("here 9")
                 # configure fsdp plugin for qlora if any
                 self._fsdp_qlora_plugin_updates()
                 if self.accelerator.mixed_precision != "fp8":
+                    print("here 10")
                     self.model = self.accelerator.prepare(self.model)
+                    print("here 11")
             self.create_optimizer_and_scheduler(num_training_steps=max_steps)
+            print("here 12")
 
         # prepare using `accelerator` prepare
         if use_accelerator_prepare:
+            print("here 13")
             self.model.train()
+            print("here 14")
             if hasattr(self.lr_scheduler, "step"):
                 if self.use_apex:
                     model = self.accelerator.prepare(self.model)
@@ -2350,6 +2380,7 @@ class Trainer:
             # In this case we are in DDP + LOMO, which should be supported
             self.optimizer = self.accelerator.prepare(self.optimizer)
 
+        print("here 15")
         if self.is_fsdp_enabled:
             self.model = self.model_wrapped = model
 
@@ -2361,6 +2392,7 @@ class Trainer:
         if self.is_deepspeed_enabled:
             self.deepspeed = self.model_wrapped
 
+        print("here 16")
         # ckpt loading
         if resume_from_checkpoint is not None:
             if self.is_deepspeed_enabled:
@@ -2370,6 +2402,7 @@ class Trainer:
             elif is_sagemaker_mp_enabled() or self.is_fsdp_enabled:
                 self._load_from_checkpoint(resume_from_checkpoint, self.model_wrapped)
 
+        print("here 17")
         # Check if saved optimizer or scheduler states exist
         self._load_optimizer_and_scheduler(resume_from_checkpoint)
 
@@ -2390,6 +2423,7 @@ class Trainer:
         logger.info(f"  Total optimization steps = {max_steps:,}")
         logger.info(f"  Number of trainable parameters = {get_model_param_count(model, trainable_only=True):,}")
 
+        print("here 18")
         self.state.epoch = 0
         start_time = time.time()
         epochs_trained = 0
@@ -2400,16 +2434,19 @@ class Trainer:
         if resume_from_checkpoint is not None and os.path.isfile(
             os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME)
         ):
+            print("here 19")
             self.state = TrainerState.load_from_json(os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME))
             self.compare_trainer_and_checkpoint_args(self.args, self.state)
             self._load_callback_state()
             epochs_trained = int(self.state.global_step // num_update_steps_per_epoch)
+            print("here 20")
             if not args.ignore_data_skip:
                 steps_trained_in_current_epoch = self.state.global_step % (num_update_steps_per_epoch)
                 steps_trained_in_current_epoch *= args.gradient_accumulation_steps
             else:
                 steps_trained_in_current_epoch = 0
 
+            print("here 21")
             logger.info("  Continuing training from checkpoint, will skip to saved global_step")
             logger.info(f"  Continuing training from epoch {epochs_trained}")
             logger.info(f"  Continuing training from global step {self.state.global_step}")
@@ -2424,6 +2461,7 @@ class Trainer:
         self.callback_handler.optimizer = self.optimizer
         self.callback_handler.lr_scheduler = self.lr_scheduler
         self.callback_handler.train_dataloader = train_dataloader
+        print("here 22")
         if self.hp_name is not None and self._trial is not None:
             # use self._trial because the SigOpt/Optuna hpo only call `_hp_search_setup(trial)` instead of passing trial
             # parameter to Train when using DDP.
@@ -2440,6 +2478,7 @@ class Trainer:
         self.state.is_local_process_zero = self.is_local_process_zero()
         self.state.is_world_process_zero = self.is_world_process_zero()
 
+        print("here 23")
         # tr_loss is a tensor to avoid synchronization of TPUs through .item()
         tr_loss = torch.tensor(0.0).to(args.device)
         # _total_loss_scalar is updated everytime .item() has to be called on tr_loss and stores the sum of all losses
@@ -2448,13 +2487,17 @@ class Trainer:
         model.zero_grad()
         grad_norm: Optional[float] = None
         self.control = self.callback_handler.on_train_begin(args, self.state, self.control)
-
+        print("here 24")
         if args.eval_on_start:
+            print("here 25")
             self._evaluate(trial, ignore_keys_for_eval, skip_scheduler=True)
+            print("here 26")
 
         for epoch in range(epochs_trained, num_train_epochs):
+            print("here 27")
             epoch_dataloader = train_dataloader
             if hasattr(epoch_dataloader, "set_epoch"):
+                print("here 28")
                 epoch_dataloader.set_epoch(epoch)
 
             # Reset the past mems state at the beginning of each epoch if necessary.
@@ -2466,11 +2509,12 @@ class Trainer:
                 if len_dataloader is not None
                 else args.max_steps * args.gradient_accumulation_steps
             )
+            print("here 29")
             self.control = self.callback_handler.on_epoch_begin(args, self.state, self.control)
-
+            print("here 30")
             if epoch == epochs_trained and resume_from_checkpoint is not None and steps_trained_in_current_epoch == 0:
                 self._load_rng_state(resume_from_checkpoint)
-
+            print("here 31")
             rng_to_sync = False
             steps_skipped = 0
             if steps_trained_in_current_epoch > 0:
@@ -2488,10 +2532,14 @@ class Trainer:
             update_step = -1
             total_updates = steps_in_epoch // args.gradient_accumulation_steps + 1
             for _ in range(total_updates):
+                print("here total updates")
                 update_step += 1
                 num_batches = args.gradient_accumulation_steps if update_step != (total_updates - 1) else remainder
+                print("here 32")
                 batch_samples, num_items_in_batch = self.get_batch_samples(epoch_iterator, num_batches)
+                print("here 33")
                 for i, inputs in enumerate(batch_samples):
+                    print(f"here batch samples {i}")
                     step += 1
                     do_sync_step = (step + 1) % args.gradient_accumulation_steps == 0 or (step + 1) == steps_in_epoch
                     # Since we perform prefetching, we need to manually set sync_gradients
@@ -2500,24 +2548,29 @@ class Trainer:
                     else:
                         self.accelerator.gradient_state._set_sync_gradients(True)
 
+                    print("here 34")
                     if self.args.include_num_input_tokens_seen:
                         main_input_name = getattr(self.model, "main_input_name", "input_ids")
                         if main_input_name not in inputs:
+                            print("here 35")
                             logger.warning(
                                 "Tried to track the number of tokens seen, however the current model is "
                                 "not configured properly to know what item is the input. To fix this, add "
                                 "a `main_input_name` attribute to the model class you are using."
                             )
                         else:
+                            print("here 36")
                             input_tokens = inputs[main_input_name].numel()
                             input_tokens = torch.tensor(input_tokens, device=self.args.device, dtype=torch.int64)
                             self.state.num_input_tokens_seen += (
                                 self.accelerator.gather(input_tokens).sum().cpu().item()
                             )
+                            print(input_tokens.shape)
                     if rng_to_sync:
                         self._load_rng_state(resume_from_checkpoint)
                         rng_to_sync = False
 
+                    print("here 37")
                     # Skip past any already trained steps if resuming training
                     if steps_trained_in_current_epoch > 0:
                         steps_trained_in_current_epoch -= 1
@@ -2530,9 +2583,11 @@ class Trainer:
                         steps_trained_progress_bar.close()
                         steps_trained_progress_bar = None
 
+                    print("here 38")
                     if step % args.gradient_accumulation_steps == 0:
                         self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
 
+                    print("here 39")
                     # We explicitly want to avoid relying on `accelerator.accumulate` for generation training
                     context = (
                         functools.partial(self.accelerator.no_sync, model=model)
@@ -2540,9 +2595,11 @@ class Trainer:
                         and self.accelerator.distributed_type != DistributedType.DEEPSPEED
                         else contextlib.nullcontext
                     )
+                    print("here 40")
                     with context():
                         tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
 
+                    print("here 41")
                     if (
                         args.logging_nan_inf_filter
                         and not is_torch_xla_available()
@@ -2559,7 +2616,9 @@ class Trainer:
 
                     self.current_flos += float(self.floating_point_ops(inputs))
 
+                    print("here 42")
                     if do_sync_step:
+                        print("here 43")
                         # Since we perform prefetching, we need to manually set sync_gradients to True
                         self.accelerator.gradient_state._set_sync_gradients(True)
 
@@ -2612,6 +2671,7 @@ class Trainer:
                             tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time
                         )
                     else:
+                        print("here 44")
                         self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
 
                     # PyTorch/XLA relies on the data loader to insert the mark_step for
@@ -2626,6 +2686,8 @@ class Trainer:
                     if is_torch_xla_available():
                         xm.mark_step()
                     break
+                
+            print("here 45")
             if step < 0:
                 logger.warning(
                     "There seems not to be a single sample in your epoch_iterator, stopping training at step"
@@ -2636,7 +2698,7 @@ class Trainer:
 
             self.control = self.callback_handler.on_epoch_end(args, self.state, self.control)
             self._maybe_log_save_evaluate(tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time)
-
+            print("here 46")
             if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
                 if is_torch_xla_available():
                     # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
@@ -2653,8 +2715,10 @@ class Trainer:
             # Clean the state at the end of training
             delattr(self, "_past")
 
+        print("here 46")
         logger.info("\n\nTraining completed. Do not forget to share your model on huggingface.co/models =)\n\n")
         if args.load_best_model_at_end and self.state.best_model_checkpoint is not None:
+            print("here 47")
             # Wait for everyone to get here so we are sure the model has been saved by process 0.
             if is_torch_xla_available():
                 xm.rendezvous("load_best_model_at_end")
@@ -2666,10 +2730,11 @@ class Trainer:
             self._load_best_model()
 
         # add remaining tr_loss
+        print("here 48")
         self._total_loss_scalar += tr_loss.item()
         effective_global_step = max(self.state.global_step, 0.001)  # Avoid ZeroDivisionError
         train_loss = self._total_loss_scalar / effective_global_step
-
+        print("here 49")
         metrics = speed_metrics(
             "train",
             start_time,
@@ -2680,7 +2745,7 @@ class Trainer:
         self.store_flos()
         metrics["total_flos"] = self.state.total_flos
         metrics["train_loss"] = train_loss
-
+        print("here 50")
         self.is_in_train = False
 
         self._memory_tracker.stop_and_update_metrics(metrics)
@@ -2690,6 +2755,7 @@ class Trainer:
         run_dir = self._get_output_dir(trial)
         checkpoints_sorted = self._sorted_checkpoints(use_mtime=False, output_dir=run_dir)
 
+        print("here 51")
         # Delete the last checkpoint when save_total_limit=1 if it's different from the best checkpoint and process allowed to save.
         if self.args.should_save and self.state.best_model_checkpoint is not None and self.args.save_total_limit == 1:
             for checkpoint in checkpoints_sorted:
@@ -2698,7 +2764,7 @@ class Trainer:
                     shutil.rmtree(checkpoint, ignore_errors=True)
 
         self.control = self.callback_handler.on_train_end(args, self.state, self.control)
-
+        print("here 52")
         # Wait for the checkpoint to be uploaded.
         self._finish_current_push()
 
@@ -2707,6 +2773,7 @@ class Trainer:
         if self.neftune_noise_alpha is not None:
             self._deactivate_neftune(self.model)
 
+        print("reached the end!")
         return TrainOutput(self.state.global_step, train_loss, metrics)
 
     def _get_output_dir(self, trial):
